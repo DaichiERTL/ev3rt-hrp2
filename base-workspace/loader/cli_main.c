@@ -20,6 +20,8 @@
 #include "mbed-interface.h"
 #include "apploader.h"
 
+#include <stdlib.h>
+
 static bool_t load_success;
 
 /**
@@ -80,6 +82,26 @@ void load_bootapp() {
 	}
 }
 #endif
+
+static int compare_hash(STK_T* hash1, STK_T* hash2, uint32_t hash_size) {
+	uint32_t i = 0;
+	for(i = 0; i < hash_size; ++i) {
+		if(hash1[i] < hash2[i]) {
+			return -1;
+		} else if(hash1[i] > hash2[i]) {
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+static void calculate_hash(STK_T* hash, uint32_t hash_size) {
+	uint32_t i = 0;
+	for(i = 0; i < hash_size; ++i) {
+		hash[i] = 0x6867666564636261;
+	}
+}
 
 static
 void test_sd_loader(intptr_t unused) {
@@ -301,11 +323,85 @@ void test_bluetooth_pan_loader(intptr_t portid) {
 	show_message_box("Error", "Failed to load application.");
 }
 
+static
+void test_bluetooth_pan_loader_secure_update(intptr_t portid) {
+    const char *file_name;
+    uint32_t    file_size;
+
+    const uint32_t hash_size = 32;
+    STK_T received_hash[hash_size];
+    STK_T calculated_hash[hash_size];
+
+	/**
+	 * Draw GUI
+	 */
+	font_t *font = global_brick_info.font_w10h16;
+	bitmap_t *screen = global_brick_info.lcd_screen;
+	int offset_y = 0;
+	bitmap_bitblt(NULL, 0, 0, screen, 0, offset_y, screen->width, font->height * 2, ROP_CLEAR); // Clear
+	bitmap_bitblt(NULL, 0, 0, screen, 0, offset_y, screen->width, font->height, ROP_SET); // Clear
+	bitmap_draw_string("Receive App File", screen, (screen->width - strlen("Receive App File") * font->width) / 2, offset_y, font, ROP_COPYINVERTED);
+	offset_y += font->height * 2;
+	bitmap_bitblt(NULL, 0, 0, screen, 0, offset_y, screen->width, screen->height, ROP_CLEAR); // Clear
+	bitmap_draw_string("BT PAN IP Addr.:", screen, 0, offset_y, font, ROP_COPY);
+	offset_y += font->height * 2;
+	bitmap_draw_string(ev3rt_bluetooth_ip_address, screen, 0, offset_y, font, ROP_COPY);
+	offset_y += font->height * 2;
+//    syslog(LOG_NOTICE, "%s", cm->title);
+
+
+	platform_pause_application(false); // Ensure the priority of Bluetooth task
+
+    httpd_receive_file_start(app_binary_buf, TMAX_APP_BINARY_SIZE);
+    while(!global_brick_info.button_pressed[BRICK_BUTTON_BACK]) {
+        tslp_tsk(100);
+        if (http_receive_file_poll(&file_name, &file_size)) { // File received
+            syslog(LOG_NOTICE, "File '%s' (%lu bytes) is received.", file_name, file_size);
+            if (strcmp("", file_name) == 0) { // uImage received
+            	if(file_size < sizeof(STK_T) * hash_size) {
+            		show_message_box("dmloadS", "File size is too small."); // ファイルサイズがハッシュ長より小さいのはおかしい。処理もバグるので終了
+            		break;
+            	}
+
+            	uint32_t buf_ll_size = file_size / sizeof(STK_T);
+            	uint32_t hash_index = buf_ll_size - hash_size;
+            	for(hash_index = 0; hash_index < hash_size; ++hash_index) {
+            		received_hash[hash_index] = app_binary_buf[hash_index + buf_ll_size - hash_size];
+            	}
+
+            	calculate_hash(calculated_hash, hash_size);
+            	if(compare_hash(calculated_hash, received_hash, hash_size) != 0) {
+            		show_message_box("dmloadS", "Hash value is invalid.");
+            		break;
+            	}
+
+                apploader_store_file("/uImage", app_binary_buf, file_size - hash_size * sizeof(STK_T));
+	            show_message_box("uImage Received", "Please restart  EV3 to use it.");
+            } else { // User application received
+    	        static char filepath[1024/* TODO: check length? */];
+    	        strcpy(filepath, "/ev3rt/apps"/*SD_APP_FOLDER*/);
+    	        strcat(filepath, "/");
+    	        strcat(filepath, file_name);
+                apploader_store_file(filepath, app_binary_buf, file_size);
+	            show_message_box("App Received", "Click the CENTER button to run.");
+                if (!load_application(app_binary_buf, file_size) == E_OK) break; // goto cancel
+                load_success = true;
+            }
+            return;
+        }
+    }
+
+    // Cancel
+    while(global_brick_info.button_pressed[BRICK_BUTTON_BACK]);
+    httpd_receive_file_start(NULL, 0);
+	show_message_box("Error", "Failed to load application.");
+}
 
 static const CliMenuEntry entry_tab[] = {
 	{ .key = '1', .title = "SD card", .handler = test_sd_loader },
 	{ .key = '2', .title = "Bluetooth PAN", .handler = test_bluetooth_pan_loader },
 	{ .key = '3', .title = "Bluetooth SPP", .handler = test_serial_loader, .exinf = SIO_PORT_BT },
+	{ .key = '4', .title = "Secure Update", .handler = test_bluetooth_pan_loader_secure_update },
 //	{ .key = '3', .title = "Serial port 1", .handler = test_serial_loader, .exinf = SIO_PORT_UART  },
 //	{ .key = 'D', .title = "Download Application", },
 	{ .key = 'Q', .title = "Exit to console", .handler = NULL },
