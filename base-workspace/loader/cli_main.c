@@ -83,12 +83,22 @@ void load_bootapp() {
 }
 #endif
 
+static void generate_one_time_password(char* otp) {
+	ulong_t time;
+	get_tim(&time);
+	srand(time);
+	sprintf(otp, "%04d", rand() % 10000);
+	//sprintf(otp, "1234");
+}
+
 static int compare_hash(STK_T* hash1, STK_T* hash2, uint32_t hash_size) {
 	uint32_t i = 0;
 	for(i = 0; i < hash_size; ++i) {
 		if(hash1[i] < hash2[i]) {
+			syslog("%lu %lu", hash1[i], hash2[i]);
 			return -1;
 		} else if(hash1[i] > hash2[i]) {
+			syslog("%lu %lu", hash1[i], hash2[i]);
 			return 1;
 		}
 	}
@@ -328,6 +338,12 @@ void test_bluetooth_pan_loader_secure_update(intptr_t portid) {
     const char *file_name;
     uint32_t    file_size;
 
+    char otp[5];
+    generate_one_time_password(otp);
+    char msg_otp[25];
+    sprintf(msg_otp, "One-Time Password: %s", otp);
+    show_message_box("Secure Update", msg_otp);
+
     const uint32_t hash_size = 32;
     STK_T received_hash[hash_size];
     STK_T calculated_hash[hash_size];
@@ -359,7 +375,8 @@ void test_bluetooth_pan_loader_secure_update(intptr_t portid) {
             syslog(LOG_NOTICE, "File '%s' (%lu bytes) is received.", file_name, file_size);
             if (strcmp("", file_name) == 0) { // uImage received
             	if(file_size < sizeof(STK_T) * hash_size) {
-            		show_message_box("dmloadS", "File size is too small."); // ファイルサイズがハッシュ長より小さいのはおかしい。処理もバグるので終了
+            		// ファイルサイズがハッシュ長より小さいのはおかしい。処理もバグるので終了
+            		show_message_box("Secure Update", "File size is too small.");
             		break;
             	}
 
@@ -371,7 +388,7 @@ void test_bluetooth_pan_loader_secure_update(intptr_t portid) {
 
             	calculate_hash(calculated_hash, hash_size);
             	if(compare_hash(calculated_hash, received_hash, hash_size) != 0) {
-            		show_message_box("dmloadS", "Hash value is invalid.");
+            		show_message_box("Secure Update", "Hash value is invalid.");
             		break;
             	}
 
