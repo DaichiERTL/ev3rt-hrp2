@@ -85,25 +85,56 @@ void load_bootapp() {
 }
 #endif
 
-static void generate_one_time_password(char* otp) {
+static void generate_one_time_password(char* otp, uint32_t otp_size) {
 	ulong_t time;
 	get_tim(&time);
 	srand(time);
-	sprintf(otp, "%04d", rand() % 10000);
-	//sprintf(otp, "1234");
+	sprintf(otp, "%08d", rand() % 100000000);
 }
 
-static int compare_hash(STK_T* hash1, STK_T* hash2, uint32_t hash_size) {
-	uint32_t i = 0;
-	for(i = 0; i < hash_size; ++i) {
-		if(hash1[i] < hash2[i]) {
-			syslog("%lo %lo", (unsigned long)(hash1[i]), (unsigned long)(hash2[i]));
+static int compare_one_time_password(char* otp1, char* otp2, uint32_t otp_size) {	
+	syslog(LOG_NOTICE, "\r");
+	syslog(LOG_NOTICE, "otp1: %s\r", otp1);
+	syslog(LOG_NOTICE, "otp2: %s\r", otp2);
+
+	for(uint32_t i = 0; i < otp_size; ++i) {
+		if(otp1[i] < otp2[i]) {
+			syslog(LOG_NOTICE, "compare_one_time_password(): return -1\r");
 			return -1;
-		} else if(hash1[i] > hash2[i]) {
-			syslog("%lo %lo", (unsigned long)(hash1[i]), (unsigned long)(hash2[i]));
+		} else if(otp1[i] > otp2[i]) {
+			syslog(LOG_NOTICE, "compare_one_time_password(): return 1\r");
 			return 1;
 		}
 	}
+
+	syslog(LOG_NOTICE, "compare_one_time_password(): return 0\r");
+	return 0;
+}
+
+static int compare_hash(char* hash1, char* hash2, uint32_t hash_size) {
+	char hash1hex[hash_size * 2 + 1];
+	char hash2hex[hash_size * 2 + 1];
+
+	for(uint32_t i = 0; i < hash_size; ++i) {
+		sprintf(hash1hex + i * 2, "%02x", hash1[i] & 0xFF);
+		sprintf(hash2hex + i * 2, "%02x", hash2[i] & 0xFF);
+	}
+
+	syslog(LOG_NOTICE, "\r");
+	syslog(LOG_NOTICE, "hash1: %s\r", hash1hex);
+	syslog(LOG_NOTICE, "hash2: %s\r", hash2hex);
+
+	for(uint32_t i = 0; i < hash_size; ++i) {
+		if(hash1[i] < hash2[i]) {
+			syslog(LOG_NOTICE, "compare_hash(): return -1\r");
+			return -1;
+		} else if(hash1[i] > hash2[i]) {
+			syslog(LOG_NOTICE, "compare_hash(): return 1\r");
+			return 1;
+		}
+	}
+	
+	syslog(LOG_NOTICE, "compare_hash(): return 0\r");
 
 	return 0;
 }
@@ -347,8 +378,9 @@ void test_bluetooth_pan_loader_secure_update(intptr_t portid) {
     const char *file_name;
     uint32_t    file_size;
 
-    char otp[5];
-    generate_one_time_password(otp);
+	uint32_t otp_size = 8;
+    char otp[otp_size + 1];
+    generate_one_time_password(otp, otp_size);
     char msg_otp[25];
     sprintf(msg_otp, "One-Time Password: %s", otp);
     show_message_box("Secure Update", msg_otp);
@@ -390,18 +422,21 @@ void test_bluetooth_pan_loader_secure_update(intptr_t portid) {
             		show_message_box("Secure Update", "File size is valid.");
             	}
 
-            	uint32_t    otp_size = 0;
             	uint32_t   hash_size = SHA256_DIGEST_LENGTH;
             	uint32_t binary_size = file_size - hash_size - otp_size;
 
+            	syslog(LOG_NOTICE, "   otp_size = %lu\r", otp_size);
+            	syslog(LOG_NOTICE, "  hash_size = %lu\r", hash_size);
+            	syslog(LOG_NOTICE, "binary_size = %lu\r", binary_size);
+
+            	/* received_hash[] に、受信したファイル中に格納されているハッシュ値を格納 */
             	char* buf_char_pointer = (char *)app_binary_buf;
-            	for(uint32_t hash_index = 0; hash_index < hash_size; ++hash_index) {
-            		char formsg[32];
-            		sprintf(formsg, "hash[%lu] = %02x", hash_index, buf_char_pointer[hash_index])
-            		received_hash[hash_index] = buf_char_pointer[binary_size + hash_index];
+            	for(uint32_t i = 0; i < hash_size; ++i) {
+            		received_hash[i] = buf_char_pointer[binary_size + i];
             	}
 
-            	calculate_hash(calculated_hash, hash_size, app_binary_buf, binary_size);
+            	/* 受診したバイナリファイルのハッシュ値を計算し、受信したハッシュ値と比較 */
+            	calculate_hash(calculated_hash, hash_size, (char *)app_binary_buf, binary_size);
             	if(compare_hash(calculated_hash, received_hash, hash_size) != 0) {
             		show_message_box("Secure Update", "Hash value is invalid.");
             		break;
@@ -409,10 +444,21 @@ void test_bluetooth_pan_loader_secure_update(intptr_t portid) {
             		show_message_box("Secure Update", "Hash value is valid.");
             	}
 
-            	/* ココまでは実行できる */
-            	char msg[32];
-            	sprintf(msg, "%lu, %lu, %lu, %lu", otp_size, hash_size, binary_size, file_size);
-            	show_message_box("Secure Update", msg);
+            	/* received_otp[] に、受信したワンタイムパスワードを格納 */
+            	char received_otp[otp_size + 1];
+            	for(uint32_t i = 0; i < otp_size; ++i) {
+            		received_otp[i] = buf_char_pointer[i + binary_size + hash_size];
+            	}
+            	received_otp[otp_size] = '\0';
+            	syslog(LOG_NOTICE, "received_otp = \"%s\"\r", received_otp);
+
+            	/* ワンタイムパスワードを比較 */
+            	if( compare_one_time_password(otp, received_otp, otp_size) != 0 ) {
+            		show_message_box("Secure Update", "One-Time Password is wrong.");
+            		break;
+            	} else {
+            		show_message_box("Secure Update", "One-Time Password is correct.");
+            	}
 
                 apploader_store_file("/uImage", app_binary_buf, binary_size); // ハッシュ部分は無視
 	            show_message_box("uImage Received", "Please restart  EV3 to use it.");
